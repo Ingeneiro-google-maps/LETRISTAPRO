@@ -21,6 +21,13 @@ export interface RewrittenResult {
   changelog: string;
 }
 
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  text: string;
+  timestamp: Date;
+}
+
 export enum AppMode {
   EDITOR = 'EDITOR',
   VOICE = 'VOICE'

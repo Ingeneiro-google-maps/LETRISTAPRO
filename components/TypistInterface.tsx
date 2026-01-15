@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Type, FileText, Activity, CheckCircle, RefreshCw, AlertCircle, Copy, ArrowRight, Zap, Music, ThumbsUp, XCircle, AlertTriangle } from 'lucide-react';
 import { analyzeLetter, rewriteLetter } from '../services/gemini';
 import { TextAnalysis, RewrittenResult, AnnotatedSegment } from '../types';
@@ -6,10 +6,15 @@ import UniversalLoader from './UniversalLoader';
 
 interface TypistInterfaceProps {
   onActivateVoice: (context: string) => void;
+  externalText: string;
+  onExternalTextChange: (text: string) => void;
 }
 
-const TypistInterface: React.FC<TypistInterfaceProps> = ({ onActivateVoice }) => {
-  const [inputText, setInputText] = useState('');
+const TypistInterface: React.FC<TypistInterfaceProps> = ({ onActivateVoice, externalText, onExternalTextChange }) => {
+  // Use external text as the source of truth if provided, otherwise local state (though we are pushing to lift state up)
+  // To keep it simple, we sync props to state or just use props.
+  // Let's use the props directly for the main text area to allow real-time updates from voice.
+  
   const [genre, setGenre] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<TextAnalysis | null>(null);
@@ -18,7 +23,7 @@ const TypistInterface: React.FC<TypistInterfaceProps> = ({ onActivateVoice }) =>
   const [showLoader, setShowLoader] = useState(false);
 
   const handleAnalyze = () => {
-    if (!inputText.trim()) return;
+    if (!externalText.trim()) return;
     setShowLoader(true);
   };
 
@@ -28,7 +33,7 @@ const TypistInterface: React.FC<TypistInterfaceProps> = ({ onActivateVoice }) =>
     try {
       // Use "General" if no genre specified, but we encourage it.
       const targetGenre = genre.trim() || "General Professional";
-      const result = await analyzeLetter(inputText, targetGenre);
+      const result = await analyzeLetter(externalText, targetGenre);
       setAnalysis(result);
       setRewritten(null); // Reset previous rewrites
     } catch (error) {
@@ -40,10 +45,10 @@ const TypistInterface: React.FC<TypistInterfaceProps> = ({ onActivateVoice }) =>
   };
 
   const handleRewrite = async () => {
-    if (!inputText || !analysis) return;
+    if (!externalText || !analysis) return;
     setIsRewriting(true);
     try {
-      const result = await rewriteLetter(inputText, analysis);
+      const result = await rewriteLetter(externalText, analysis);
       setRewritten(result);
     } catch (error) {
       console.error("Rewrite failed", error);
@@ -109,7 +114,7 @@ const TypistInterface: React.FC<TypistInterfaceProps> = ({ onActivateVoice }) =>
             <h2 className="text-xl text-blue-400 font-semibold flex items-center gap-2 tech-font tracking-wide">
               <FileText className="w-5 h-5" /> SOURCE DOCUMENT
             </h2>
-            <div className="text-xs text-slate-500 font-mono">STATUS: {inputText.length > 0 ? 'DRAFTING' : 'IDLE'}</div>
+            <div className="text-xs text-slate-500 font-mono">STATUS: {externalText.length > 0 ? 'DRAFTING' : 'IDLE'}</div>
           </div>
           
           <div className="glass-panel p-1 rounded-xl flex-grow flex flex-col min-h-[500px]">
@@ -130,22 +135,22 @@ const TypistInterface: React.FC<TypistInterfaceProps> = ({ onActivateVoice }) =>
             <textarea
               className="w-full h-full bg-slate-900/50 text-slate-200 p-6 resize-none focus:outline-none font-light leading-relaxed scrollbar-thin transition-all"
               placeholder="Paste your letter or lyrics here for diagnostics..."
-              value={inputText}
-              onChange={(e) => setInputText(e.target.value)}
+              value={externalText}
+              onChange={(e) => onExternalTextChange(e.target.value)}
             />
             <div className="p-3 bg-slate-900/80 border-t border-slate-800 flex justify-between items-center rounded-b-lg">
-              <span className="text-xs text-slate-400 font-mono">{inputText.length} CHARS</span>
+              <span className="text-xs text-slate-400 font-mono">{externalText.length} CHARS</span>
               <div className="flex space-x-3">
                  <button 
-                  onClick={() => onActivateVoice(inputText)}
+                  onClick={() => onActivateVoice(externalText)}
                   className="px-4 py-2 text-xs font-bold text-blue-300 hover:text-white transition-colors uppercase tracking-wider"
                 >
                   Discuss with Tatiana
                 </button>
                 <button
                   onClick={handleAnalyze}
-                  disabled={!inputText.trim() || isAnalyzing}
-                  className={`px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition-all shadow-lg shadow-blue-900/20 flex items-center gap-2 uppercase tracking-wider ${(!inputText.trim() || isAnalyzing) ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  disabled={!externalText.trim() || isAnalyzing}
+                  className={`px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-md transition-all shadow-lg shadow-blue-900/20 flex items-center gap-2 uppercase tracking-wider ${(!externalText.trim() || isAnalyzing) ? 'opacity-50 cursor-not-allowed' : ''}`}
                 >
                   {isAnalyzing ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
                   DIAGNOSE

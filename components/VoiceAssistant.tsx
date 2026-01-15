@@ -1,12 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Mic, MicOff, X, Activity, Volume2, WifiOff } from 'lucide-react';
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { Mic, MicOff, X, Activity, WifiOff, Play, MessageSquare, ArrowRight, Save } from 'lucide-react';
+import { GoogleGenAI, LiveServerMessage, Modality, FunctionDeclaration, Type } from '@google/genai';
 import UniversalLoader from './UniversalLoader';
+import { ChatMessage } from '../types';
 
 interface VoiceAssistantProps {
   isOpen: boolean;
   onClose: () => void;
   initialContext?: string;
+  onUpdateText: (newText: string) => void;
 }
 
 // Audio helpers
@@ -28,12 +30,18 @@ function base64ToUint8Array(base64: string): Uint8Array {
   return bytes;
 }
 
-const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initialContext }) => {
+const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initialContext, onUpdateText }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  const [minLoadTimePassed, setMinLoadTimePassed] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [volumeLevel, setVolumeLevel] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [audioContextSuspended, setAudioContextSuspended] = useState(false);
+  
+  // Chat History State
+  const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   
   // Audio Refs
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -44,6 +52,63 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
   const sourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const sessionRef = useRef<any>(null);
 
+  // Connection Lifecycle
+  useEffect(() => {
+    let loadTimer: ReturnType<typeof setTimeout>;
+
+    if (isOpen) {
+      // Reset states
+      setError(null);
+      setMinLoadTimePassed(false);
+      setIsConnected(false);
+      setAudioContextSuspended(false);
+      setChatHistory([{
+        id: 'init',
+        role: 'system',
+        text: 'Iniciando protocolo de voz Tatiana v2.5...',
+        timestamp: new Date()
+      }]);
+      
+      // Initialize Audio Context IMMEDIATELY (while we have the user gesture token from the click)
+      initAudioContext();
+
+      // Start minimum load timer (visual only)
+      loadTimer = setTimeout(() => {
+        setMinLoadTimePassed(true);
+      }, 2000);
+
+      // Connect
+      connectToLive();
+    }
+
+    return () => {
+      clearTimeout(loadTimer);
+      cleanup();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatHistory]);
+
+  const initAudioContext = async () => {
+    try {
+      if (!audioContextRef.current) {
+        const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+        audioContextRef.current = new AudioContextClass();
+      }
+      
+      if (audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
+      setAudioContextSuspended(false);
+    } catch (e) {
+      console.warn("Audio Context Initial Suspend:", e);
+      setAudioContextSuspended(true);
+    }
+  };
+
   // Connect to Gemini Live
   const connectToLive = async () => {
     setIsConnecting(true);
@@ -51,26 +116,41 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
     
     try {
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+
+      const updateDraftTool: FunctionDeclaration = {
+        name: 'update_draft',
+        description: 'Updates the text/document visible to the user with the new agreed upon content.',
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            new_text: {
+              type: Type.STRING,
+              description: 'The full, updated text content to replace the current draft.',
+            },
+          },
+          required: ['new_text'],
+        },
+      };
+
       const config = {
         model: 'gemini-2.5-flash-native-audio-preview-12-2025',
         config: {
           responseModalities: [Modality.AUDIO],
+          inputAudioTranscription: {}, 
+          tools: [{ functionDeclarations: [updateDraftTool] }],
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
           systemInstruction: `
-            You are Tatiana, the advanced "Operating System" assistant created by GALFLY PRODUCER and Latin Grammy members.
+            You are Tatiana, a highly professional, sophisticated executive assistant created by Latin Grammy members.
             
-            CORE DIRECTIVES:
-            1. You are natural, fluid, and highly professional. Avoid robotic phrasing.
-            2. You are bilingual (English/Spanish) and should adapt to the user's language automatically.
-            3. You view yourself as a "Professional Electrician of Words".
-            4. When analyzing text, you look for "short circuits" (errors) and "high voltage" (successes).
-            5. Be concise in your speech. Do not read long texts unless asked. Summarize diagnostics naturally.
+            CRITICAL INSTRUCTION:
+            1. YOU MUST SPEAK IMMEDIATELY upon connection.
+            2. GREET THE USER IN SPANISH: "Hola, soy Tatiana. Estoy lista para trabajar en tu carta."
+            3. Act as a "Professional Electrician of Words".
+            4. Keep responses concise and professional.
             
-            CONTEXT:
-            Connected to Universal Orchard Music Group Secure Servers.
-            ${initialContext ? `Current active document context: "${initialContext}".` : ''}
+            Current Draft Context: "${initialContext?.substring(0, 1000) || '(Empty)'}..."
           `,
         },
       };
@@ -82,29 +162,73 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
             console.log("Tatiana Live Session Opened");
             setIsConnected(true);
             setIsConnecting(false);
+            
+            // 1. Start Microphone
             await startAudioInput(session);
+
+            // 2. FORCE MODEL TO SPEAK: Send a hidden text prompt to wake it up
+            // Using a generic content part to trigger response
+            try {
+               session.send({ parts: [{ text: "Hello Tatiana, introduce yourself in Spanish now." }], turnComplete: true });
+            } catch(e) {
+               console.log("Could not send initial wake up message, relying on system instruction.", e);
+            }
           },
           onmessage: async (message: LiveServerMessage) => {
              // Handle interruptions
              if (message.serverContent?.interrupted) {
-               console.log("Interruption signal received");
                stopAllAudio();
                nextStartTimeRef.current = 0;
                return;
              }
 
-             const audioData = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
-             if (audioData) {
-               playAudioChunk(audioData);
+             // Handle Tool Calls
+             if (message.toolCall) {
+                for (const fc of message.toolCall.functionCalls) {
+                  if (fc.name === 'update_draft') {
+                    const newText = (fc.args as any).new_text;
+                    onUpdateText(newText);
+                    setChatHistory(prev => [...prev, {
+                      id: Date.now().toString(),
+                      role: 'system',
+                      text: 'Document updated successfully.',
+                      timestamp: new Date()
+                    }]);
+                    session.sendToolResponse({
+                      functionResponses: {
+                        id: fc.id,
+                        name: fc.name,
+                        response: { result: "Success" }
+                      }
+                    });
+                  }
+                }
+             }
+
+             // Handle Audio Output
+             if (message.serverContent?.modelTurn) {
+               const audioData = message.serverContent.modelTurn.parts?.[0]?.inlineData?.data;
+               if (audioData) {
+                 playAudioChunk(audioData);
+               }
+             }
+             
+             // Handle Transcriptions
+             const serverContent = message.serverContent as any;
+             if (serverContent?.outputTranscription?.text) {
+                updateChatHistory('assistant', serverContent.outputTranscription.text);
+             }
+             if (serverContent?.inputTranscription?.text) {
+                 updateChatHistory('user', serverContent.inputTranscription.text);
              }
           },
           onclose: () => {
-            console.log("Tatiana Live Session Closed");
+            console.log("Session Closed");
             cleanup();
           },
           onerror: (err) => {
-            console.error("Tatiana Live Error", err);
-            setError("Connection Interrupted");
+            console.error("Live Error", err);
+            setError("Connection Error. Please retry.");
             setIsConnecting(false);
             cleanup();
           }
@@ -112,35 +236,59 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
       });
       sessionRef.current = session;
     } catch (error) {
-      console.error("Failed to connect to Live API", error);
+      console.error("Connection Failed", error);
       setError("Server Connection Failed");
       setIsConnecting(false);
       cleanup();
     }
   };
 
+  const updateChatHistory = (role: 'user' | 'assistant', text: string) => {
+    setChatHistory(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.role === role) {
+        return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+      }
+      return [...prev, {
+        id: Date.now().toString(),
+        role: role,
+        text: text,
+        timestamp: new Date()
+      }];
+    });
+  };
+
   const startAudioInput = async (session: any) => {
     try {
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      audioContextRef.current = new AudioContextClass({ sampleRate: 16000 });
-      
-      // Ensure context is running (sometimes needed for browsers)
-      if (audioContextRef.current.state === 'suspended') {
-        await audioContextRef.current.resume();
+      // Ensure context is ready
+      if (!audioContextRef.current) {
+         initAudioContext();
+      }
+      if (audioContextRef.current!.state === 'suspended') {
+        await audioContextRef.current!.resume();
+        setAudioContextSuspended(false);
       }
 
-      streamRef.current = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const actualSampleRate = audioContextRef.current!.sampleRate;
       
-      inputSourceRef.current = audioContextRef.current.createMediaStreamSource(streamRef.current);
-      // Buffer size 4096 provides a good balance between latency and processing overhead
-      processorRef.current = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+      streamRef.current = await navigator.mediaDevices.getUserMedia({ 
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          autoGainControl: true,
+          noiseSuppression: true
+        } 
+      });
+      
+      inputSourceRef.current = audioContextRef.current!.createMediaStreamSource(streamRef.current);
+      processorRef.current = audioContextRef.current!.createScriptProcessor(4096, 1, 1);
       
       processorRef.current.onaudioprocess = (e) => {
         if (isMuted) return;
 
         const inputData = e.inputBuffer.getChannelData(0);
         
-        // Simple volume visualization
+        // Visualizer data
         let sum = 0;
         for(let i=0; i<inputData.length; i++) sum += inputData[i] * inputData[i];
         setVolumeLevel(Math.sqrt(sum / inputData.length) * 100);
@@ -148,7 +296,6 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
         const pcm16 = floatTo16BitPCM(inputData);
         const uint8 = new Uint8Array(pcm16);
         
-        // Manual base64 encoding
         let binary = '';
         const len = uint8.byteLength;
         for (let i = 0; i < len; i++) {
@@ -158,14 +305,18 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
 
         session.sendRealtimeInput({
           media: {
-            mimeType: 'audio/pcm;rate=16000',
+            mimeType: `audio/pcm;rate=${actualSampleRate}`,
             data: base64Data
           }
         });
       };
 
+      const muteNode = audioContextRef.current!.createGain();
+      muteNode.gain.value = 0;
+
       inputSourceRef.current.connect(processorRef.current);
-      processorRef.current.connect(audioContextRef.current.destination);
+      processorRef.current.connect(muteNode);
+      muteNode.connect(audioContextRef.current!.destination);
 
     } catch (err) {
       console.error("Audio Input Error", err);
@@ -173,38 +324,31 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
     }
   };
 
+  const handleManualResume = async () => {
+    if (audioContextRef.current) {
+      await audioContextRef.current.resume();
+      setAudioContextSuspended(false);
+    }
+  };
+
   const playAudioChunk = async (base64Audio: string) => {
-    // We reuse the context if possible, or create a dedicated output context
-    // Ideally use one context for the app, but here we create one on demand or use a persistent one if we restructured.
-    // For robustness in this isolated component, let's create a new context or use a persistent output ref.
-    // Re-creating contexts frequently is bad practice. Let's try to use a static context or ref.
-    
-    // NOTE: Using a persistent context for output is better.
-    // However, since we are inside a function, let's just make sure we handle the timing correctly.
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    const outputCtx = new AudioContextClass({ sampleRate: 24000 }); 
-    // Optimization: In a real prod app, we'd keep this context alive in a ref. 
-    // For this snippet, we'll instantiate but note that heavy load might glitch.
-    // Better: use a single output context in a Ref if possible, but sample rate matching is key.
-    
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+
     try {
       const audioBytes = base64ToUint8Array(base64Audio);
-      
-      // PCM decoding logic (16-bit, little-endian, 24kHz)
       const dataInt16 = new Int16Array(audioBytes.buffer);
-      const buffer = outputCtx.createBuffer(1, dataInt16.length, 24000);
+      const buffer = ctx.createBuffer(1, dataInt16.length, 24000);
       const channelData = buffer.getChannelData(0);
       for (let i = 0; i < dataInt16.length; i++) {
         channelData[i] = dataInt16[i] / 32768.0;
       }
 
-      const source = outputCtx.createBufferSource();
+      const source = ctx.createBufferSource();
       source.buffer = buffer;
-      source.connect(outputCtx.destination);
+      source.connect(ctx.destination);
       
-      const currentTime = outputCtx.currentTime;
-      
-      // Robust Scheduling
+      const currentTime = ctx.currentTime;
       if (nextStartTimeRef.current < currentTime) {
         nextStartTimeRef.current = currentTime;
       }
@@ -214,11 +358,6 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
 
       source.onended = () => {
         sourcesRef.current = sourcesRef.current.filter(s => s !== source);
-        // Clean up context if we created it just for this chunk (not ideal but safe for GC)
-        // outputCtx.close(); 
-        // Actually, closing context here might clip audio if we have queued chunks.
-        // It's better to NOT close it immediately if we are streaming. 
-        // Given the constraint of the snippet, we let GC handle it or use a persistent context.
       };
       
       sourcesRef.current.push(source);
@@ -251,109 +390,126 @@ const VoiceAssistant: React.FC<VoiceAssistantProps> = ({ isOpen, onClose, initia
     }
     if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
       audioContextRef.current.close();
+      audioContextRef.current = null;
     }
     sessionRef.current = null;
     setVolumeLevel(0);
   };
 
-  useEffect(() => {
-    if (isOpen && !isConnected && !isConnecting) {
-      // Auto-connect when opened
-    }
-    if (!isOpen) {
-      cleanup();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen]);
-
   if (!isOpen) return null;
 
+  const showLoader = !minLoadTimePassed || (isConnecting && !error);
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-md">
-      {isConnecting ? (
-        <UniversalLoader onComplete={() => connectToLive()} message="Initializing Voice Protocol: Tatiana" />
-      ) : (
-        <div className="w-full max-w-lg p-1 bg-gradient-to-br from-blue-600 to-cyan-400 rounded-3xl animate-in zoom-in-95 duration-300">
-           <div className="bg-slate-950 rounded-[22px] p-8 flex flex-col items-center relative overflow-hidden">
-             
-             {/* Background Effects */}
-             <div className="absolute top-0 left-0 w-full h-full opacity-20 pointer-events-none">
-                <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 bg-blue-500 rounded-full blur-[100px] animate-pulse"></div>
-             </div>
+    <>
+      <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm transition-opacity" onClick={onClose}></div>
 
-             <button onClick={onClose} className="absolute top-4 right-4 text-slate-500 hover:text-white transition-colors z-50">
-               <X className="w-6 h-6" />
-             </button>
-
-             <div className="mb-8 text-center space-y-1 z-10">
-               <h2 className="text-2xl font-bold text-white tracking-widest tech-font">TATIANA</h2>
-               <p className="text-xs text-blue-400 uppercase tracking-widest font-mono">OS V2.5 // GALFLY PRODUCER</p>
-               <div className="text-[10px] text-slate-600 font-mono mt-2 flex justify-center gap-2">
-                 <span>STATUS: {error ? 'ERROR' : 'ONLINE'}</span>
-                 <span>|</span>
-                 <span>SECURE</span>
-               </div>
-             </div>
-
-             {/* Visualizer */}
-             <div className="relative w-48 h-48 flex items-center justify-center mb-10">
-               {/* Error State */}
-               {error ? (
-                 <div className="absolute inset-0 flex items-center justify-center">
-                    <WifiOff className="w-16 h-16 text-red-500/50" />
-                 </div>
-               ) : (
-                 <>
-                   {/* Rings */}
-                   <div className={`absolute inset-0 border-2 border-blue-500/30 rounded-full transition-all duration-100 ease-out`} 
-                        style={{ transform: `scale(${1 + volumeLevel/30})` }}></div>
-                   <div className={`absolute inset-4 border border-cyan-400/20 rounded-full transition-all duration-100 ease-out delay-75`}
-                        style={{ transform: `scale(${1 + volumeLevel/40})` }}></div>
-                   
-                   {/* Center Avatar */}
-                   <div className="w-32 h-32 rounded-full bg-gradient-to-b from-slate-800 to-slate-900 shadow-[0_0_30px_rgba(59,130,246,0.5)] flex items-center justify-center relative z-20 border border-slate-700">
-                     <div className={`w-2 h-12 bg-blue-500 rounded-full mx-1 transition-all duration-75`} style={{ height: `${10 + volumeLevel * 2}px` }}></div>
-                     <div className={`w-2 h-16 bg-cyan-400 rounded-full mx-1 transition-all duration-75`} style={{ height: `${20 + volumeLevel * 3}px` }}></div>
-                     <div className={`w-2 h-12 bg-blue-500 rounded-full mx-1 transition-all duration-75`} style={{ height: `${10 + volumeLevel * 2}px` }}></div>
-                   </div>
-                 </>
-               )}
-             </div>
-
-             {/* Error Message */}
-             {error && (
-               <div className="mb-6 px-4 py-2 bg-red-900/20 border border-red-500/50 rounded text-red-300 text-xs font-mono text-center">
-                 SYSTEM FAILURE: {error}
-                 <br/>
-                 <button onClick={() => connectToLive()} className="mt-2 underline hover:text-white">RETRY CONNECTION</button>
-               </div>
-             )}
-
-             {/* Controls */}
-             <div className="flex items-center space-x-6 z-10">
-               <button 
-                 onClick={() => setIsMuted(!isMuted)}
-                 disabled={!!error}
-                 className={`p-4 rounded-full border transition-all ${isMuted ? 'bg-red-900/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-white hover:bg-slate-700'} ${error ? 'opacity-50 cursor-not-allowed' : ''}`}
-               >
-                 {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
-               </button>
-               
-               <div className="h-10 w-[1px] bg-slate-800"></div>
-
-               <div className="flex flex-col items-center">
-                  <span className="text-[10px] text-slate-500 uppercase font-bold mb-1">Status</span>
-                  <div className="flex items-center gap-2 text-xs text-blue-300 font-mono">
-                    <span className={`w-2 h-2 rounded-full ${error ? 'bg-red-500' : 'bg-green-500 animate-pulse'}`}></span>
-                    {error ? 'DISCONNECTED' : 'LISTENING'}
+      <div className={`fixed inset-y-0 right-0 z-50 w-full max-w-md bg-slate-950 border-l border-blue-900/50 shadow-2xl transform transition-transform duration-300 ease-out flex flex-col ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+        
+        {showLoader ? (
+          <div className="flex-1 flex flex-col items-center justify-center p-8">
+             <UniversalLoader onComplete={() => {}} message="Initializing Tatiana OS" />
+          </div>
+        ) : (
+          <>
+            <div className="p-6 border-b border-slate-900 bg-slate-950/50 backdrop-blur flex justify-between items-center relative overflow-hidden">
+               <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-blue-600 to-cyan-400"></div>
+               <div>
+                  <h2 className="text-xl font-bold text-white tracking-widest tech-font flex items-center gap-2">
+                    TATIANA <span className="text-[10px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded border border-blue-500/30">V2.5 LIVE</span>
+                  </h2>
+                  <div className="flex items-center gap-2 text-[10px] text-slate-500 font-mono mt-1">
+                    <span className={`w-1.5 h-1.5 rounded-full ${error ? 'bg-red-500' : 'bg-green-500 animate-pulse'}`}></span>
+                    {error ? 'CONNECTION ERROR' : 'VOICE CHANNEL ACTIVE'}
                   </div>
                </div>
-             </div>
+               <button onClick={onClose} className="text-slate-500 hover:text-white transition-colors">
+                 <X className="w-6 h-6" />
+               </button>
+            </div>
 
-           </div>
-        </div>
-      )}
-    </div>
+            {error && (
+               <div className="bg-red-900/20 p-4 border-b border-red-900/50 flex items-center justify-between">
+                 <div className="flex items-center gap-2 text-red-300 text-xs">
+                   <WifiOff className="w-4 h-4" />
+                   <span>{error}</span>
+                 </div>
+                 <button onClick={() => connectToLive()} className="text-xs text-white underline">Retry</button>
+               </div>
+            )}
+
+            {audioContextSuspended && !error && (
+               <button onClick={handleManualResume} className="bg-blue-900/20 p-4 border-b border-blue-900/50 flex items-center justify-center gap-2 text-blue-300 text-xs hover:bg-blue-900/30 transition-colors w-full animate-pulse">
+                 <Play className="w-4 h-4" />
+                 <span>TAP TO ACTIVATE AUDIO SPEAKERS</span>
+               </button>
+            )}
+
+            <div className="h-32 flex items-center justify-center bg-slate-900/30 border-b border-slate-900 relative overflow-hidden">
+                <div className="absolute inset-0 opacity-20 pointer-events-none">
+                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-48 h-48 bg-blue-500 rounded-full blur-[80px]"></div>
+                </div>
+                <div className="relative z-10 flex items-end gap-1 h-12">
+                   {[...Array(20)].map((_, i) => (
+                      <div 
+                        key={i} 
+                        className="w-1 bg-gradient-to-t from-blue-600 to-cyan-400 rounded-full transition-all duration-75"
+                        style={{ 
+                          height: `${Math.max(10, Math.random() * volumeLevel * 2)}%`,
+                          opacity: volumeLevel > 1 ? 1 : 0.3
+                        }}
+                      ></div>
+                   ))}
+                </div>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin scrollbar-track-slate-900 scrollbar-thumb-slate-800">
+               {chatHistory.length === 0 && (
+                 <div className="text-center text-slate-600 text-sm mt-10">
+                   <Activity className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                   <p>Connecting to Universal Music Servers...</p>
+                 </div>
+               )}
+               {chatHistory.map((msg) => (
+                 <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div className={`max-w-[85%] rounded-2xl p-3 text-sm leading-relaxed ${
+                       msg.role === 'user' 
+                         ? 'bg-blue-600 text-white rounded-br-none' 
+                         : msg.role === 'system'
+                           ? 'bg-slate-800/50 text-slate-400 text-xs font-mono border border-slate-800 w-full text-center'
+                           : 'bg-slate-800 text-slate-200 rounded-bl-none border border-slate-700'
+                    }`}>
+                       {msg.role === 'assistant' && (
+                         <div className="text-[10px] text-blue-400 font-bold mb-1 uppercase tracking-wider">Tatiana</div>
+                       )}
+                       {msg.text}
+                    </div>
+                 </div>
+               ))}
+               <div ref={chatEndRef} />
+            </div>
+
+            <div className="p-6 bg-slate-950 border-t border-slate-900">
+               <div className="flex items-center justify-center gap-6">
+                  <button 
+                    onClick={() => setIsMuted(!isMuted)}
+                    disabled={!!error}
+                    className={`p-4 rounded-full border transition-all ${isMuted ? 'bg-red-900/20 border-red-500 text-red-500' : 'bg-slate-800 border-slate-700 text-white hover:bg-slate-700 shadow-lg'} ${error ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+                  </button>
+                  <div className="text-center">
+                     <div className="text-[10px] text-slate-500 uppercase tracking-widest font-bold mb-1">Status</div>
+                     <div className="text-xs text-blue-400 font-mono flex items-center gap-2">
+                        {isMuted ? 'MIC MUTED' : 'LISTENING'}
+                     </div>
+                  </div>
+               </div>
+            </div>
+          </>
+        )}
+      </div>
+    </>
   );
 };
 
