@@ -1,0 +1,7 @@
+{
+  "name": "Tatiana - Professional Typist",
+  "description": "A futuristic, professional typist assistant created by Latin Grammy members, featuring advanced text analysis and a voice persona named Tatiana.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
